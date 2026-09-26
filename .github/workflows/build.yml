@@ -6,83 +6,161 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: Build for Paper/Leaf 26.1.2
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Repository
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
+      # ------------------------------------------------------------
+      # 2. Find the exact 26.1.2 update commit
+      # ------------------------------------------------------------
       - name: Find 26.1.2 commit
         id: find-commit
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching for RayTraceAntiXray 26.1.2 commit..."
+          echo "Searching repository history for the 26.1.2 update..."
+          echo
 
-          COMMIT="$(git log --all \
-            --format='%H' \
-            --grep='26\.1\.2' \
-            -n 1)"
+          COMMIT="$(
+            git log \
+              --all \
+              --format='%H' \
+              --grep='26\.1\.2' \
+              -n 1
+          )"
 
           if [ -z "$COMMIT" ]; then
             echo "::error::Could not find a commit mentioning 26.1.2."
             echo
-            echo "Available matching commits:"
-            git log --all --oneline --decorate --grep='26\.1' || true
+            echo "Recent version-related commits:"
+            git log --all --oneline --decorate --grep='26\.1' -20 || true
             exit 1
           fi
 
-          echo "Found commit:"
-          git show -s --format='%H %s' "$COMMIT"
+          echo "Selected commit:"
+          git show -s --format='%H%n%s%n%ad' --date=iso "$COMMIT"
 
+          echo
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
 
+      # ------------------------------------------------------------
+      # 3. Checkout the selected historical version
+      # ------------------------------------------------------------
       - name: Checkout 26.1.2 source
         run: |
           set -euo pipefail
 
           git checkout "${{ steps.find-commit.outputs.commit }}"
 
-          echo "Selected commit:"
+          echo "Checked out:"
           git show -s --format='%H%n%s%n%ad' --date=iso
 
-      - name: Verify Minecraft/Paper version
+      # ------------------------------------------------------------
+      # 4. Install Java
+      # ------------------------------------------------------------
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      # ------------------------------------------------------------
+      # 5. Basic source validation
+      # ------------------------------------------------------------
+      - name: Validate source version
         shell: bash
         run: |
           set -euo pipefail
 
           EXPECTED_MINECRAFT="26.1.2"
 
-          echo "Checking Maven configuration..."
+          if [ ! -f pom.xml ]; then
+            echo "::error::Root pom.xml not found."
+            exit 1
+          fi
 
-          MINECRAFT_VERSION="$(sed -n 's:.*<minecraftVersion>\(.*\)</minecraftVersion>.*:\1:p' pom.xml | head -n 1)"
-          PAPER_VERSION="$(sed -n 's:.*<paperVersion>\(.*\)</paperVersion>.*:\1:p' pom.xml | head -n 1)"
+          MINECRAFT_VERSION="$(
+            sed -n \
+              's:.*<minecraftVersion>\(.*\)</minecraftVersion>.*:\1:p' \
+              pom.xml \
+              | head -n 1
+          )"
 
-          echo "minecraftVersion = ${MINECRAFT_VERSION:-NOT FOUND}"
-          echo "paperVersion     = ${PAPER_VERSION:-NOT FOUND}"
+          if [ -z "$MINECRAFT_VERSION" ]; then
+            echo "::error::minecraftVersion could not be detected."
+            exit 1
+          fi
+
+          echo "minecraftVersion = $MINECRAFT_VERSION"
 
           if [ "$MINECRAFT_VERSION" != "$EXPECTED_MINECRAFT" ]; then
-            echo "::error::Wrong Minecraft version!"
+            echo "::error::Wrong Minecraft version."
             echo "Expected: $EXPECTED_MINECRAFT"
-            echo "Found:    ${MINECRAFT_VERSION:-NOT FOUND}"
+            echo "Found:    $MINECRAFT_VERSION"
             exit 1
           fi
+
+          echo "Minecraft version check passed."
+
+      # ------------------------------------------------------------
+      # 6. Resolve Maven properties and validate Paper version
+      # ------------------------------------------------------------
+      - name: Verify Paper dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED_MINECRAFT="26.1.2"
+
+          PAPER_VERSION_RAW="$(
+            sed -n \
+              's:.*<paperVersion>\(.*\)</paperVersion>.*:\1:p' \
+              pom.xml \
+              | head -n 1
+          )"
+
+          if [ -z "$PAPER_VERSION_RAW" ]; then
+            echo "::error::paperVersion could not be detected."
+            exit 1
+          fi
+
+          # Resolve ${minecraftVersion}, just like Maven does.
+          PAPER_VERSION="$(
+            printf '%s' "$PAPER_VERSION_RAW" |
+            sed "s/\\\${minecraftVersion}/$EXPECTED_MINECRAFT/g"
+          )"
+
+          echo "paperVersion raw      = $PAPER_VERSION_RAW"
+          echo "paperVersion resolved = $PAPER_VERSION"
 
           if [[ "$PAPER_VERSION" != 26.1.2.* ]]; then
-            echo "::error::Wrong Paper version!"
-            echo "Expected Paper 26.1.2.x"
-            echo "Found:    ${PAPER_VERSION:-NOT FOUND}"
+            echo "::error::Wrong Paper version."
+            echo "Expected: 26.1.2.*"
+            echo "Found:    $PAPER_VERSION"
             exit 1
           fi
 
-          echo "Maven version verification passed."
+          echo "Paper version check passed."
 
-      - name: Verify plugin.yml API version
+      # ------------------------------------------------------------
+      # 7. Verify plugin.yml
+      # ------------------------------------------------------------
+      - name: Verify plugin.yml
         shell: bash
         run: |
           set -euo pipefail
@@ -92,44 +170,160 @@ jobs:
           PLUGIN_YML="RayTraceAntiXray/src/main/resources/plugin.yml"
 
           if [ ! -f "$PLUGIN_YML" ]; then
-            echo "::error::plugin.yml not found: $PLUGIN_YML"
+            echo "::error::plugin.yml not found:"
+            echo "$PLUGIN_YML"
             exit 1
           fi
 
-          API_VERSION="$(sed -n "s/^api-version:[[:space:]]*['\"]\\{0,1\\}\\([^'\"]*\\)['\"]\\{0,1\\}/\\1/p" "$PLUGIN_YML" | head -n 1)"
+          echo "plugin.yml:"
+          cat "$PLUGIN_YML"
+          echo
 
-          echo "plugin.yml api-version = ${API_VERSION:-NOT FOUND}"
+          API_VERSION="$(
+            sed -n \
+              "s/^api-version:[[:space:]]*['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}/\1/p" \
+              "$PLUGIN_YML" \
+              | head -n 1
+          )"
+
+          if [ -z "$API_VERSION" ]; then
+            echo "::error::api-version could not be detected."
+            exit 1
+          fi
+
+          echo "api-version = $API_VERSION"
 
           if [ "$API_VERSION" != "$EXPECTED_API" ]; then
-            echo "::error::Wrong plugin API version!"
+            echo "::error::Wrong plugin API version."
             echo "Expected: $EXPECTED_API"
-            echo "Found:    ${API_VERSION:-NOT FOUND}"
+            echo "Found:    $API_VERSION"
             exit 1
           fi
 
-          echo "plugin.yml API verification passed."
+          echo "plugin.yml API check passed."
 
-      - name: Set up Java 25
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
-          cache: maven
-
-      - name: Build
-        run: |
-          chmod +x mvnw
-          ./mvnw clean package --batch-mode
-
-      - name: Verify generated JAR
+      # ------------------------------------------------------------
+      # 8. Ask Maven for the effective POM
+      # ------------------------------------------------------------
+      - name: Generate effective Maven POM
         shell: bash
         run: |
           set -euo pipefail
 
-          JAR="$(find RayTraceAntiXray/target -maxdepth 1 -type f -name '*.jar' \
-            ! -name '*-sources.jar' \
-            ! -name '*-javadoc.jar' \
-            | head -n 1)"
+          chmod +x mvnw
+
+          ./mvnw \
+            help:effective-pom \
+            -Doutput=effective-pom.xml \
+            --batch-mode \
+            --no-transfer-progress
+
+          if [ ! -s effective-pom.xml ]; then
+            echo "::error::effective-pom.xml was not generated."
+            exit 1
+          fi
+
+          echo "Effective Maven POM generated."
+
+      # ------------------------------------------------------------
+      # 9. Verify resolved Paper dependency
+      # ------------------------------------------------------------
+      - name: Verify resolved Paper API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPECTED="26.1.2"
+
+          echo "Searching effective POM for Paper dependency..."
+          echo
+
+          PAPER_MATCHES="$(
+            grep -n \
+              -E 'paper-api|paperweight|io\.papermc' \
+              effective-pom.xml \
+              | head -n 100 \
+              || true
+          )"
+
+          echo "$PAPER_MATCHES"
+          echo
+
+          # The effective POM must contain the 26.1.2 Paper version.
+          if ! grep -q '26\.1\.2' effective-pom.xml; then
+            echo "::error::Effective POM does not contain Paper 26.1.2."
+            exit 1
+          fi
+
+          echo "Effective POM contains Paper 26.1.2."
+
+      # ------------------------------------------------------------
+      # 10. Resolve dependency tree
+      # ------------------------------------------------------------
+      - name: Verify Maven dependency tree
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ./mvnw \
+            dependency:tree \
+            --batch-mode \
+            --no-transfer-progress \
+            -DoutputFile=dependency-tree.txt
+
+          echo "Relevant Paper dependencies:"
+          grep -Ei \
+            'paper-api|paperweight|paper' \
+            dependency-tree.txt \
+            || true
+
+          echo
+
+          if grep -Eiq \
+            'paper-api.*26\.2|paper-api.*26\.3|paper-api.*26\.4' \
+            dependency-tree.txt; then
+
+            echo "::error::A newer Paper API was resolved!"
+            echo
+            grep -Ei \
+              'paper-api|paperweight|paper' \
+              dependency-tree.txt \
+              || true
+
+            exit 1
+          fi
+
+          echo "Dependency tree check passed."
+
+      # ------------------------------------------------------------
+      # 11. Build
+      # ------------------------------------------------------------
+      - name: Build plugin
+        run: |
+          set -euo pipefail
+
+          ./mvnw clean package \
+            --batch-mode \
+            --no-transfer-progress
+
+      # ------------------------------------------------------------
+      # 12. Find generated JAR
+      # ------------------------------------------------------------
+      - name: Find generated plugin JAR
+        id: find-jar
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JAR="$(
+            find RayTraceAntiXray/target \
+              -maxdepth 1 \
+              -type f \
+              -name '*.jar' \
+              ! -name '*-sources.jar' \
+              ! -name '*-javadoc.jar' \
+              | head -n 1
+          )"
 
           if [ -z "$JAR" ]; then
             echo "::error::No plugin JAR was generated."
@@ -139,32 +333,79 @@ jobs:
           echo "Generated JAR:"
           echo "$JAR"
 
-          echo
-          echo "JAR contents:"
-          unzip -l "$JAR" | grep 'plugin.yml'
+          echo "jar=$JAR" >> "$GITHUB_OUTPUT"
 
+      # ------------------------------------------------------------
+      # 13. Inspect the actual plugin.yml inside the JAR
+      # ------------------------------------------------------------
+      - name: Verify generated JAR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JAR="${{ steps.find-jar.outputs.jar }}"
+
+          echo "Inspecting:"
+          echo "$JAR"
           echo
+
+          if ! unzip -l "$JAR" | grep -q 'plugin.yml'; then
+            echo "::error::plugin.yml is missing from the generated JAR."
+            exit 1
+          fi
+
           echo "Generated plugin.yml:"
+          echo "--------------------"
           unzip -p "$JAR" plugin.yml
+          echo "--------------------"
+          echo
 
-          GENERATED_API="$(unzip -p "$JAR" plugin.yml \
-            | sed -n "s/^api-version:[[:space:]]*['\"]\\{0,1\\}\\([^'\"]*\\)['\"]\\{0,1\\}/\\1/p" \
-            | head -n 1)"
+          GENERATED_API="$(
+            unzip -p "$JAR" plugin.yml |
+            sed -n \
+              "s/^api-version:[[:space:]]*['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}/\1/p" |
+            head -n 1
+          )"
+
+          echo "Generated API version = ${GENERATED_API:-NOT FOUND}"
 
           if [ "$GENERATED_API" != "26.1.2" ]; then
-            echo "::error::Generated JAR has wrong API version!"
+            echo "::error::Generated JAR has the wrong API version."
             echo "Expected: 26.1.2"
             echo "Found:    ${GENERATED_API:-NOT FOUND}"
             exit 1
           fi
 
-          echo
-          echo "Generated JAR verification passed."
+          echo "Generated JAR API check passed."
 
+      # ------------------------------------------------------------
+      # 14. Final summary
+      # ------------------------------------------------------------
+      - name: Build summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JAR="${{ steps.find-jar.outputs.jar }}"
+
+          echo "========================================"
+          echo " RayTraceAntiXray build successful"
+          echo "========================================"
+          echo
+          echo "Minecraft/Paper API : 26.1.2"
+          echo "Source commit       : ${{ steps.find-commit.outputs.commit }}"
+          echo "Plugin JAR          : $JAR"
+          echo
+          ls -lh "$JAR"
+
+      # ------------------------------------------------------------
+      # 15. Upload artifact
+      # ------------------------------------------------------------
       - name: Upload plugin JAR
         uses: actions/upload-artifact@v6
         with:
           name: RayTraceAntiXray-1.17.1-26.1.2
+          if-no-files-found: error
           path: |
             RayTraceAntiXray/target/*.jar
             !RayTraceAntiXray/target/*-sources.jar

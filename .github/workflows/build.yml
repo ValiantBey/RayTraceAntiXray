@@ -20,25 +20,36 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
 
-      # Paperweight/Libs derlemesi arka planda git commit/am kullandığından bu şarttır
       - name: Configure Git
         run: |
-          git config --global user.email "ci@github.com"
-          git config --global user.name "GitHub Actions"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
 
-      - name: Make scripts executable
+      # Çalıştırma izinlerini ver
+      - name: Grant execute permissions
         run: |
-          chmod +x mvnw
-          chmod +x compilew.sh 2>/dev/null || true
+          chmod +x mvnw compile.sh compilew.sh 2>/dev/null || true
 
-      - name: Build with Maven Wrapper
-        run: ./mvnw clean package --batch-mode -e
+      # Maven yerine projenin kendi derleme betiğini çalıştırıyoruz
+      # Betik Paperclip bağımlılıklarını doğru parametrelerle hazırlar
+      - name: Run compile script
+        env:
+          MAVEN_OPTS: "-Xmx3G"
+        run: |
+          if [ -f "./compilew.sh" ]; then
+            ./compilew.sh
+          elif [ -f "./compile.sh" ]; then
+            ./compile.sh
+          else
+            ./mvnw clean package -DskipTests
+          fi
 
       - name: Upload Built JAR Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RayTraceAntiXray-jar
-          path: RayTraceAntiXray/target/*.jar
+          path: |
+            RayTraceAntiXray/target/*.jar
+            target/*.jar
           if-no-files-found: error

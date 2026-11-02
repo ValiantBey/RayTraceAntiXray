@@ -250,7 +250,7 @@ jobs:
           echo
 
           # The effective POM must contain the 26.2 Paper version.
-          if ! grep -q '26\.1\.2' effective-pom.xml; then
+          if ! grep -Eq '<version>[[:space:]]*26\.2\.' effective-pom.xml; then
             echo "::error::Effective POM does not contain Paper 26.2."
             exit 1
           fi
